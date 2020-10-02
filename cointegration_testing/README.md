@@ -2,6 +2,6 @@
 Team - please add which test you will be evaluating this week. 
 
 Vincent:  
-Tejas:  
-Harrison:  
+Tejas: Phillips and Ouliaris Testing
+Harrison: 
 Abhishek: Johannsen Testing 
