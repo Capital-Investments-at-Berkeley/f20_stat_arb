@@ -19,6 +19,11 @@ sectors = [
     gt.SectorConstants.TRANSPORT
 ]
 
+def get_data(ticker):
+    data = yf.download(tickers=ticker, period='1mo', interval='1h')
+    log_price = np.log(data.values)
+    return log_price
+
 bad_data=set()
 def engle_list(tickers):
     result = englegranger(tickers[0], tickers[1])
@@ -36,12 +41,7 @@ def englegranger(ticker1, ticker2, prnt=False):
     """
     if ticker1 in bad_data or ticker2 in bad_data:
         return -1*float('inf'), 0
-    def get_data(ticker):
-        data = Ticker(ticker).history(period = "3y")['Close']
-        log_price = np.log(data.values)
-        log_price = log_price[~np.isnan(log_price)]
-        log_price = log_price[~np.isinf(log_price)]
-        return log_price
+    
     logpricet1 = get_data(ticker1)
     logpricet2 = get_data(ticker2)
     if len(logpricet1) == 0:
@@ -67,23 +67,20 @@ def englegranger(ticker1, ticker2, prnt=False):
 
 def run_coint_test():
     results = []
-    idx, top_n = 0, 100
-    print('lists made')
-    while idx < len(sectors):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            curr_sector = sectors[idx]
-            curr_tickers = gt.get_biggest_n_tickers(top_n, sectors=curr_sector)
-            futures = [executor.submit(engle_list, [ticker1, ticker2]) for ticker1 in curr_tickers for ticker2 in curr_tickers if ticker1 != ticker2]
-            print('executor set up')
-            for i, fut in enumerate(concurrent.futures.as_completed(futures)):
-                if i%1000 == 0:
-                    print(i)
-                    results_df = DataFrame(results, columns={'Ticker 1', 'Ticker 2', '5% Level', 'Normalized Score'})
-                    results_df.to_csv('parallel_coint_scores2.csv', index=False, encoding='utf-8')
-                if fut.result()[2] == -1*float('inf'):
-                    continue
-                results.append(fut.result())
-        idx += 1
+    top_n = 100
+    tickers = []
+    for sector in sectors:
+        tickers.extend(gt.get_biggest_n_tickers(top_n, sectors=curr_sector))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(engle_list, [ticker1, ticker2]) for ticker1 in tickers for ticker2 in tickers if ticker1 != ticker2]
+        for i, fut in enumerate(concurrent.futures.as_completed(futures)):
+            if i%1000 == 0:
+                print(i)
+                results_df = DataFrame(results, columns={'Ticker 1', 'Ticker 2', '5% Level', 'Normalized Score'})
+                results_df.to_csv('parallel_coint_scores2.csv', index=False, encoding='utf-8')
+            if fut.result()[2] == -1*float('inf'):
+                continue
+            results.append(fut.result())
     return results
 
 results = run_coint_test()
