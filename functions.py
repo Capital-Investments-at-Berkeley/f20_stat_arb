@@ -8,6 +8,7 @@ import pandas as pd
 import datetime as dt
 from pykalman import KalmanFilter
 import mlfinlab.data_structures.time_data_structures as time_data_structures
+import operator
 
 def runCointTestIndividual(etf, tickers, start, end):
     coint_data = pd.DataFrame(columns=['ticker', 't-stat', 'pval'])
@@ -199,7 +200,7 @@ def constructTradeLog(datetime, positions, priceY, priceX, hedgeRatios, lot_size
             tradeLog = [None] * 12
             holdingPeriod = 0
         curr_position = p
-    return df.reindex(index=df.index[::-1])
+    return df#.reindex(index=df.index[::-1])
 
 def calculateDollarProfit(positions, priceY, priceX, hedgeRatios, lot_size = 1):
     profitY = []
@@ -261,3 +262,66 @@ def calculateDollarProfit(positions, priceY, priceX, hedgeRatios, lot_size = 1):
 
 def calculateCumulativeProfit(profit1, profit2):
     return np.cumsum(profit1 + profit2)
+
+def tuneBBParameters(data, lookbacks, z_threshs, ticker_list):
+    size = len(lookbacks) * len(z_threshs)
+    results = {}
+    counter = 0
+    for lookback in lookbacks:
+        for z_thresh in z_threshs:
+            counter += 1
+            dataTemp = data.copy()
+            syntheticAssetLogPrice = dataTemp[ticker_list].apply(np.log)
+            qqqLogPrice = np.log(dataTemp['qqqclose'].values)
+            
+            kf = multivariateKalmanFilter(syntheticAssetLogPrice, qqqLogPrice)
+            state_means, state_covs = kf.filter(qqqLogPrice)
+            slopes=state_means[:, np.arange(0, len(ticker_list), 1)]
+            
+            syntheticAssetEstimate = [np.dot(slopes[i], syntheticAssetLogPrice.values[i].T) for i in range(len(slopes))]
+            spread_ts = qqqLogPrice - syntheticAssetEstimate
+            
+            dataTemp.reset_index(inplace=True)
+            dataTemp['logspread'] = spread_ts
+            dataTemp['spread'] = np.exp(spread_ts)
+            dataTemp = dataTemp.rename(columns={'index': 'datetime'})
+            
+            price_data = dataTemp[['datetime']]
+            price_data['logspread'] = spread_ts
+            price_data['spread'] = np.exp(spread_ts)
+            price_data['qqqclose'] = dataTemp['qqqclose']
+            price_data[ticker_list] = dataTemp[ticker_list]
+            
+            backtest_data = createBands(price_data, lookback, z_thresh)
+            backtest_data = createSignal(backtest_data)
+            backtest_data['position'] = backtest_data['signal'].shift(1).fillna(0)
+            hedge_ratios = np.asarray([slopes.T[i][lookback - 1:] for i in range(len(slopes.T))])
+            
+            profitY, profitX, pos_size = calculateDollarProfit(backtest_data['position'].values, backtest_data['qqqclose'].values, 
+                                backtest_data[ticker_list].values, 
+                                hedge_ratios.T.round(3), 
+                                lot_size = 1000)
+            
+            cumulative_profit = calculateCumulativeProfit(profitY, profitX).iloc[-1]
+            backtest_data['returns'] = (profitY + profitX) / pos_size
+            cumulative_returns = np.cumprod(1 + backtest_data['returns']).iloc[-1]
+            
+            backtest_data['datetime'] = pd.to_datetime(backtest_data['datetime'])
+            dailyReturns = calculateDailyReturns(backtest_data[['datetime', 'returns']])
+            annualizedSharpe = calculateAnnualizedSharpeRatio(dailyReturns)
+            
+            results[(lookback, z_thresh)] = [cumulative_profit, cumulative_returns, annualizedSharpe]
+
+            if counter % 10 == 0 or counter == size:
+                print(counter, "done, out of", size)
+                
+    return dict(sorted(results.items(), key=lambda item: item[1][1], reverse=True)) # sort by annualized Sharpe
+
+def calculateDailyReturns(minuteRets):
+    minuteRets['dayperiod'] = minuteRets['datetime'].dt.to_period('D')
+    minuteRets['returns'] = minuteRets['returns'] + 1
+    dailyreturns = minuteRets.groupby('dayperiod')['returns'].apply(lambda x: x.cumprod().iloc[-1] - 1)
+    return dailyreturns
+
+def calculateAnnualizedSharpeRatio(dailyRets):
+    return np.sqrt(252) * (dailyRets.mean() / dailyRets.std())
