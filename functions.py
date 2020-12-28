@@ -144,126 +144,126 @@ def createSignal(data):
     data['signal'] = data['signal'].ffill().fillna(0)
     return data
 
-def constructTradeLog(datetime, positions, priceY, priceX, hedgeRatios, lot_size = 1):
-    col_list = ['start', 'end', 'holdingPeriod', 'positionSizeY', 'entryY', 'exitY', 
-                'positionSizeX', 'entryX', 'exitX', 'position', 'profit', 'returns']
-    df = pd.DataFrame(columns=col_list)
+def createPositions(data):
+    dataWithPosition = pd.DataFrame()
+    data['datetime'] = pd.to_datetime(data['datetime'])
+    dfList = [group[1] for group in data.groupby(data['datetime'].dt.date)]
+    for day in dfList:        
+        day['aboveOrBelowEMA'] = np.where(day['spread'] > day['ema'], 1, -1)
+        day['signal'] = np.where(day['spread'] > day['upperband'], -1, np.nan)
+        day['signal'] = np.where(day['spread'] < day['lowerband'], 1, day['signal'])
+        day['signal'] = np.where(day['aboveOrBelowEMA'] * day['aboveOrBelowEMA'].shift(1) < 0, 
+                                         0, day['signal'])
+        day['signal'] = day['signal'].ffill().fillna(0)
+        day['position'] = day['signal'].shift(1).fillna(0)
+        if day['position'].iloc[-1] != 0:
+            day['position'].iloc[-1] = 0
+        dataWithPosition = dataWithPosition.append(day)      
+    return dataWithPosition
+
+def constructTradeLog(datetime, positions, priceY, priceX, hedgeRatios, stoploss = None, lot_size = 1):
+    logdictlist = []
+    minutedictlist = []
+    
     curr_position = 0
     basketSize = len(priceX[0])
     holdingPeriod = 0
-    tradeLog = [None] * 12
+    cumulative_tradeprofit = 0
+    stoppedOut = False
+
+    tradeDict = {}
+    minuteDict = {}
+    
     for i, p in enumerate(positions):
-        if curr_position == 0 and p == 1: # open long (long Y, short X)
-            tradeLog[0] = datetime[i]
-            tradeLog[3] = lot_size
-            tradeLog[4] = priceY[i]
-            tradeLog[6] = [hedgeRatios[i][j] * lot_size for j in range(basketSize)]
-            tradeLog[7] = [priceX[i][j] for j in range(basketSize)]
-            tradeLog[9] = p
+        minuteDict['datetime'] = datetime[i]        
+        if (curr_position == 0 and p == 1) or (curr_position == 0 and p == -1): # open position; long = long Y, short X
+            tradeDict['start'] = datetime[i]
+            tradeDict['positionSizeY'] = lot_size
+            tradeDict['entryY'] = priceY[i]
+            tradeDict['positionSizeX'] = [hedgeRatios[i][j] * lot_size for j in range(basketSize)]
+            tradeDict['entryX'] = [priceX[i][j] for j in range(basketSize)]
+            tradeDict['initialPortfolioValue'] = (tradeDict['positionSizeY'] * tradeDict['entryY']) + \
+                                                    sum([tradeDict['positionSizeX'][j] * priceX[i][j] for j in range(basketSize)])
+            if p == 1:
+                tradeDict['position'] = 'long'
+            else:
+                tradeDict['position'] = 'short'
+            
+            minuteDict['profit'] = 0
+            minuteDict['returns'] = 0
+            
             holdingPeriod += 1
-        elif curr_position == 0 and p == -1: # open short
-            tradeLog[0] = datetime[i]
-            tradeLog[3] = lot_size
-            tradeLog[4] = priceY[i]
-            tradeLog[6] = [hedgeRatios[i][j] * lot_size for j in range(basketSize)]
-            tradeLog[7] = [priceX[i][j] for j in range(basketSize)]
-            tradeLog[9] = p
-            holdingPeriod += 1
+
         elif curr_position * p == 1:
-            holdingPeriod += 1
-        elif curr_position == 1 and p == 0: # close long
-            tradeLog[1] = datetime[i]
-            tradeLog[2] = holdingPeriod
-            tradeLog[5] = priceY[i]
-            tradeLog[8] = [priceX[i][j] for j in range(basketSize)]
-            profitY = tradeLog[3] * (tradeLog[5] -tradeLog[4])
-            profitX = sum([tradeLog[6][j] * (tradeLog[7][j] - tradeLog[8][j]) for j in range(basketSize)])
-            tradeLog[10] = profitY + profitX
-            tradeLog[11] = tradeLog[10] / ((tradeLog[3] * tradeLog[4]) + sum([tradeLog[6][j] * tradeLog[7][j] for j in range(basketSize)]))
-            df.loc[-1] = tradeLog  # adding a row
-            df.index = df.index + 1  # shifting index
-            df = df.sort_index()  # sorting by index
-            tradeLog = [None] * 12
-            holdingPeriod = 0
-        elif curr_position == -1 and p == 0: # close short
-            tradeLog[1] = datetime[i]
-            tradeLog[2] = holdingPeriod
-            tradeLog[5] = priceY[i]
-            tradeLog[8] = [priceX[i][j] for j in range(basketSize)]
-            profitY = tradeLog[3] * (tradeLog[4] -tradeLog[5])
-            profitX = sum([tradeLog[6][j] * (tradeLog[8][j] - tradeLog[7][j]) for j in range(basketSize)])
-            tradeLog[10] = profitY + profitX
-            tradeLog[11] = tradeLog[10] / ((tradeLog[3] * tradeLog[4]) + sum([tradeLog[6][j] * tradeLog[7][j] for j in range(basketSize)]))
-            df.loc[-1] = tradeLog  # adding a row
-            df.index = df.index + 1  # shifting index
-            df = df.sort_index()  # sorting by index
-            tradeLog = [None] * 12
-            holdingPeriod = 0
-        curr_position = p
-    return df#.reindex(index=df.index[::-1])
+            profit = 0
+            if stoppedOut == False:
+                if p == 1:
+                    profitY = tradeDict['positionSizeY'] * (priceY[i] - priceY[i - 1])
+                    profitX = sum([tradeDict['positionSizeX'][j] * (priceX[i - 1][j] - priceX[i][j]) for j in range(basketSize)])
+                else:
+                    profitY = tradeDict['positionSizeY'] * (priceY[i - 1] - priceY[i])
+                    profitX = sum([tradeDict['positionSizeX'][j] * (priceX[i][j] - priceX[i - 1][j]) for j in range(basketSize)])
 
-def calculateDollarProfit(positions, priceY, priceX, hedgeRatios, lot_size = 1):
-    profitY = []
-    profitX = []
-    curr_position = 0
-    openIndex = 0
-    position_sizes = []
-    for i, p in enumerate(positions):
-        if curr_position == 0 and p == 0:
-            profitY.append(0)
-            profitX.append(0)
-            position_sizes.append(1)
-        
-        elif curr_position == 0 and p == 1: # open long (long Y, short X)
-            profitY.append(0)
-            profitX.append(0)
-            position_sizes.append(1)
-            openIndex = i
-        
-        elif curr_position == 0 and p == -1: # open short
-            profitY.append(0)
-            profitX.append(0)
-            position_sizes.append(1)
-            openIndex = i
+                profit = profitY + profitX
+                cumulative_tradeprofit += profit
+
+                if stoploss != None:
+                    if cumulative_tradeprofit / tradeDict['initialPortfolioValue'] <= stoploss:
+                        stoppedOut = True
+                        tradeDict['end'] = datetime[i]
+                        tradeDict['holdingPeriod'] = holdingPeriod
+                        tradeDict['exitY'] = priceY[i]
+                        tradeDict['exitX'] = [priceX[i][j] for j in range(basketSize)]
+                        tradeDict['trade_profit'] = cumulative_tradeprofit
+                        tradeDict['trade_returns'] = cumulative_tradeprofit / tradeDict['initialPortfolioValue']
+                        
+                holdingPeriod += 1
             
-        elif curr_position == 1 and p == 1: # calculate profit from previous bar
-            profitY.append(priceY[i] - priceY[i - 1])
-            profitX.append(sum([priceX[i - 1][j] * hedgeRatios[openIndex][j] - 
-                               priceX[i][j] * hedgeRatios[openIndex][j] for j in range(len(hedgeRatios[openIndex]))]))
-            position_sizes.append(priceY[i - 1] + sum([priceX[i - 1][j] * hedgeRatios[openIndex][j] 
-                                                   for j in range(len(hedgeRatios[openIndex]))]))
-        
-        elif curr_position == -1 and p == -1: # calculate profit from previous bar
-            profitY.append(priceY[i - 1] - priceY[i])
-            profitX.append(sum([priceX[i][j] * hedgeRatios[openIndex][j] - 
-                               priceX[i - 1][j] * hedgeRatios[openIndex][j] for j in range(len(hedgeRatios[openIndex]))]))
-            position_sizes.append(priceY[i - 1] + sum([priceX[i - 1][j] * hedgeRatios[openIndex][j] 
-                                                   for j in range(len(hedgeRatios[openIndex]))]))
+            minuteDict['profit'] = profit
+            minuteDict['returns'] = profit / tradeDict['initialPortfolioValue']
             
-        elif curr_position == 1 and p == 0: # close long
-            profitY.append(priceY[i] - priceY[i - 1])
-            profitX.append(sum([priceX[i - 1][j] * hedgeRatios[openIndex][j] - 
-                               priceX[i][j] * hedgeRatios[openIndex][j] for j in range(len(hedgeRatios[openIndex]))]))
-            position_sizes.append(priceY[i - 1] + sum([priceX[i - 1][j] * hedgeRatios[openIndex][j] 
-                                                   for j in range(len(hedgeRatios[openIndex]))]))
-            openIndex = 0
-        
-        elif curr_position == -1 and p == 0: # close short
-            profitY.append(priceY[i - 1] - priceY[i])
-            profitX.append(sum([priceX[i][j] * hedgeRatios[openIndex][j] - 
-                               priceX[i - 1][j] * hedgeRatios[openIndex][j] for j in range(len(hedgeRatios[openIndex]))]))
-            position_sizes.append(priceY[i - 1] + sum([priceX[i - 1][j] * hedgeRatios[openIndex][j] 
-                                                   for j in range(len(hedgeRatios[openIndex]))]))
-            openIndex = 0
+        elif (curr_position == 1 and p == 0) or (curr_position == -1 and p == 0): # close
+            profit = 0
+            if stoppedOut == False:
+                if curr_position == 1:
+                    profitY = tradeDict['positionSizeY'] * (priceY[i] - priceY[i - 1])
+                    profitX = sum([tradeDict['positionSizeX'][j] * (priceX[i - 1][j] - priceX[i][j]) for j in range(basketSize)])
+                else:
+                    profitY = tradeDict['positionSizeY'] * (priceY[i - 1] - priceY[i])
+                    profitX = sum([tradeDict['positionSizeX'][j] * (priceX[i][j] - priceX[i - 1][j]) for j in range(basketSize)])
+
+                profit = profitY + profitX
+                cumulative_tradeprofit += profit
+                
+                tradeDict['end'] = datetime[i]
+                tradeDict['holdingPeriod'] = holdingPeriod
+                tradeDict['exitY'] = priceY[i]
+                tradeDict['exitX'] = [priceX[i][j] for j in range(basketSize)]
+                tradeDict['trade_profit'] = cumulative_tradeprofit
+                tradeDict['trade_returns'] = cumulative_tradeprofit / tradeDict['initialPortfolioValue']
+                
+            minuteDict['profit'] = profit
+            minuteDict['returns'] = profit / tradeDict['initialPortfolioValue']
+            
+            logdictlist.append(tradeDict)
+            stoppedOut = False
+            holdingPeriod = 0
+            cumulative_tradeprofit = 0
+            tradeDict = {}
+            
+        elif curr_position == 0 and p == 0:
+            minuteDict['profit'] = 0
+            minuteDict['returns'] = 0
         
         curr_position = p
-   
-    return pd.Series(profitY) * lot_size, pd.Series(profitX) * lot_size, pd.Series(position_sizes) * lot_size
+        minutedictlist.append(minuteDict)
+        minuteDict = {}
+        
+    clist = ['start', 'end', 'holdingPeriod', 'position', 'positionSizeY', 'entryY', 'exitY', 'positionSizeX', 'entryX', 'exitX', 
+             'initialPortfolioValue', 'trade_profit', 'trade_returns']
+    return pd.DataFrame(logdictlist, columns=clist), pd.DataFrame(minutedictlist)
 
-def calculateCumulativeProfit(profit1, profit2):
-    return np.cumsum(profit1 + profit2)
-
-def tuneBBParameters(data, lookbacks, z_threshs, ticker_list):
+def tuneBBParameters(data, lookbacks, z_threshs, ticker_list, stoploss = None):
     size = len(lookbacks) * len(z_threshs)
     results = {}
     counter = 0
@@ -293,21 +293,21 @@ def tuneBBParameters(data, lookbacks, z_threshs, ticker_list):
             price_data[ticker_list] = dataTemp[ticker_list]
             
             backtest_data = createBands(price_data, lookback, z_thresh)
-            backtest_data = createSignal(backtest_data)
-            backtest_data['position'] = backtest_data['signal'].shift(1).fillna(0)
-            hedge_ratios = np.asarray([slopes.T[i][lookback - 1:] for i in range(len(slopes.T))])
+            backtest_data = createPositions(backtest_data)
+            hedge_ratios = np.asarray([slopes.T[i][lookback - 1:] for i in range(len(slopes.T))]).T
             
-            profitY, profitX, pos_size = calculateDollarProfit(backtest_data['position'].values, backtest_data['qqqclose'].values, 
-                                backtest_data[ticker_list].values, 
-                                hedge_ratios.T.round(3), 
-                                lot_size = 1000)
+            tradeLog, minuteDf = constructTradeLog(backtest_data['datetime'], 
+                                                   backtest_data['position'].values, 
+                                                   backtest_data['qqqclose'].values, 
+                                                   backtest_data[ticker_list].values, 
+                                                   hedge_ratios.round(3), stoploss = stoploss,
+                                                   lot_size = 1000)
             
-            cumulative_profit = calculateCumulativeProfit(profitY, profitX).iloc[-1]
-            backtest_data['returns'] = (profitY + profitX) / pos_size
-            cumulative_returns = np.cumprod(1 + backtest_data['returns']).iloc[-1]
+            cumulative_profit = minuteDf['profit'].sum()
+            cumulative_returns = np.cumprod(1 + minuteDf['returns']).iloc[-1]
             
-            backtest_data['datetime'] = pd.to_datetime(backtest_data['datetime'])
-            dailyReturns = calculateDailyReturns(backtest_data[['datetime', 'returns']])
+            minuteDf['datetime'] = pd.to_datetime(minuteDf['datetime'])
+            dailyReturns = calculateDailyReturns(minuteDf[['datetime', 'returns']])
             annualizedSharpe = calculateAnnualizedSharpeRatio(dailyReturns)
             
             results[(lookback, z_thresh)] = [cumulative_profit, cumulative_returns, annualizedSharpe]
@@ -315,7 +315,7 @@ def tuneBBParameters(data, lookbacks, z_threshs, ticker_list):
             if counter % 10 == 0 or counter == size:
                 print(counter, "done, out of", size)
                 
-    return dict(sorted(results.items(), key=lambda item: item[1][1], reverse=True)) # sort by annualized Sharpe
+    return dict(sorted(results.items(), key=lambda item: item[1][0], reverse=True))
 
 def calculateDailyReturns(minuteRets):
     minuteRets['dayperiod'] = minuteRets['datetime'].dt.to_period('D')
