@@ -276,9 +276,10 @@ def tuneBBParameters(data, lookbacks, z_threshs, ticker_list, stoploss = None):
             
             kf = multivariateKalmanFilter(syntheticAssetLogPrice, qqqLogPrice)
             state_means, state_covs = kf.filter(qqqLogPrice)
-            slopes=state_means[:, np.arange(0, len(ticker_list), 1)]
+            slopes = state_means[:, np.arange(0, len(ticker_list), 1)]
+            intercept = state_means[:, len(ticker_list)]
             
-            syntheticAssetEstimate = [np.dot(slopes[i], syntheticAssetLogPrice.values[i].T) for i in range(len(slopes))]
+            syntheticAssetEstimate = [np.dot(slopes[i], syntheticAssetLogPrice.values[i].T) + intercept[i] for i in range(len(slopes))]
             spread_ts = qqqLogPrice - syntheticAssetEstimate
             
             dataTemp.reset_index(inplace=True)
@@ -315,7 +316,7 @@ def tuneBBParameters(data, lookbacks, z_threshs, ticker_list, stoploss = None):
             if counter % 10 == 0 or counter == size:
                 print(counter, "done, out of", size)
                 
-    return dict(sorted(results.items(), key=lambda item: item[1][0], reverse=True))
+    return dict(sorted(results.items(), key=lambda item: item[1][2], reverse=True))
 
 def calculateDailyReturns(minuteRets):
     minuteRets['dayperiod'] = minuteRets['datetime'].dt.to_period('D')
