@@ -9,6 +9,7 @@ import datetime as dt
 from pykalman import KalmanFilter
 import mlfinlab.data_structures.time_data_structures as time_data_structures
 import operator
+from mlfinlab.optimal_mean_reversion import OrnsteinUhlenbeck
 
 def runCointTestIndividual(etf, tickers, start, end):
     coint_data = pd.DataFrame(columns=['ticker', 't-stat', 'pval'])
@@ -111,12 +112,14 @@ def univariateKalmanFilter(priceX, priceY):
 
 def multivariateKalmanFilter(pricesX: pd.DataFrame, priceY):
     basket = pricesX.to_numpy()
-    obs_mat = sm.add_constant(basket, prepend=False)[:, np.newaxis]
+    obs_mat = basket[:, np.newaxis]
     basket_size = obs_mat[0].shape[1]
     delta = 1e-5
     trans_cov = delta / (1 - delta) * np.eye(basket_size)
+    #print(basket[0])
     init_mean = basket[0]/priceY[0]
-    init_mean = np.append(init_mean, [0])
+    #init_mean = np.append(init_mean, [0])
+    #print(init_mean)
     kf = KalmanFilter(n_dim_obs=1, n_dim_state=basket_size,
                     initial_state_mean = init_mean,
                     initial_state_covariance = np.ones((basket_size,basket_size)),
@@ -131,6 +134,14 @@ def createBands(data, lookback, z_threshold=1):
     rolling_std = data['spread'].rolling(lookback).std()
     data['upperband'] = data['ema'] + (z_threshold * rolling_std)
     data['lowerband'] = data['ema'] - (z_threshold * rolling_std)
+    data = data.dropna()
+    data = data.reset_index()
+    return data
+
+def createBars(data, lower, upper, avg):
+    data['upperband'] = upper
+    data['lowerband'] = lower
+    data['ema'] = avg
     data = data.dropna()
     data = data.reset_index()
     return data
@@ -150,8 +161,54 @@ def createPositions(data):
     dfList = [group[1] for group in data.groupby(data['datetime'].dt.date)]
     for day in dfList:        
         day['aboveOrBelowEMA'] = np.where(day['spread'] > day['ema'], 1, -1)
-        day['signal'] = np.where(day['spread'] > day['upperband'], -1, np.nan)
-        day['signal'] = np.where(day['spread'] < day['lowerband'], 1, day['signal'])
+        day['signal'] = np.where((day['spread'] > day['upperband']), -1, np.nan)
+        day['signal'] = np.where((day['spread'] < day['lowerband']), 1, day['signal'])
+        day['signal'] = np.where(day['aboveOrBelowEMA'] * day['aboveOrBelowEMA'].shift(1) < 0, 
+                                         0, day['signal'])
+        day['signal'] = day['signal'].ffill().fillna(0)
+        day['position'] = day['signal'].shift(1).fillna(0)
+        if day['position'].iloc[-1] != 0:
+            day['position'].iloc[-1] = 0
+        dataWithPosition = dataWithPosition.append(day)      
+    return dataWithPosition
+
+def calculateDiffThresh(data, q=0.1):
+    spread_diff = np.ediff1d(data['spread'])
+    spread_diff = np.insert(spread_diff, 0, 0)
+    data['spread_diff'] = 100 * (abs(spread_diff) / abs(data['spread'].shift(-1)))
+    return data['spread_diff'].quantile(q)
+
+def createOptimalPositions(data, threshold=.0001):
+    spread_diff = np.ediff1d(data['spread'])
+    spread_diff = np.insert(spread_diff, 0, 0)
+    data['spread_diff'] = 100 * (abs(spread_diff) / abs(data['spread'].shift(-1)))
+    dataWithPosition = pd.DataFrame()
+    data['datetime'] = pd.to_datetime(data['datetime'])
+    dfList = [group[1] for group in data.groupby(data['datetime'].dt.date)]
+    for day in dfList:        
+        day['aboveOrBelowEMA'] = np.where(day['spread'] > day['ema'], 1, -1)
+        day['signal'] = np.where((day['spread'] > day['upperband']) & (day['spread_diff'].abs() < threshold), -1, np.nan)
+        day['signal'] = np.where((day['spread'] < day['lowerband']) & (day['spread_diff'].abs() < threshold), 1, day['signal'])
+        day['signal'] = np.where(day['aboveOrBelowEMA'] * day['aboveOrBelowEMA'].shift(1) < 0, 
+                                         0, day['signal'])
+        day['signal'] = day['signal'].ffill().fillna(0)
+        day['position'] = day['signal'].shift(1).fillna(0)
+        if day['position'].iloc[-1] != 0:
+            day['position'].iloc[-1] = 0
+        dataWithPosition = dataWithPosition.append(day)      
+    return dataWithPosition
+
+def createDerivativePositions(data):
+    spread_diff = np.ediff1d(data['spread'])
+    spread_diff = np.insert(spread_diff, 0, 0)
+    data['spread_diff'] = spread_diff
+    dataWithPosition = pd.DataFrame()
+    data['datetime'] = pd.to_datetime(data['datetime'])
+    dfList = [group[1] for group in data.groupby(data['datetime'].dt.date)]
+    for day in dfList:        
+        day['aboveOrBelowEMA'] = np.where(day['spread'] > day['ema'], 1, -1)
+        day['signal'] = np.where(day['spread'] + day['spread_diff'] > day['upperband'], -1, np.nan)
+        day['signal'] = np.where(day['spread'] + day['spread_diff'] < day['lowerband'], 1, day['signal'])
         day['signal'] = np.where(day['aboveOrBelowEMA'] * day['aboveOrBelowEMA'].shift(1) < 0, 
                                          0, day['signal'])
         day['signal'] = day['signal'].ffill().fillna(0)
@@ -216,7 +273,7 @@ def constructTradeLog(datetime, positions, priceY, priceX, hedgeRatios, stoploss
                         tradeDict['exitX'] = [priceX[i][j] for j in range(basketSize)]
                         tradeDict['trade_profit'] = cumulative_tradeprofit
                         tradeDict['trade_returns'] = cumulative_tradeprofit / tradeDict['initialPortfolioValue']
-                        
+                       
                 holdingPeriod += 1
             
             minuteDict['profit'] = profit
@@ -260,7 +317,7 @@ def constructTradeLog(datetime, positions, priceY, priceX, hedgeRatios, stoploss
         minuteDict = {}
         
     clist = ['start', 'end', 'holdingPeriod', 'position', 'positionSizeY', 'entryY', 'exitY', 'positionSizeX', 'entryX', 'exitX', 
-             'initialPortfolioValue', 'trade_profit', 'trade_returns']
+             'initialPortfolioValue', 'trade_profit', 'trade_returns', 'trade_profit2']
     return pd.DataFrame(logdictlist, columns=clist), pd.DataFrame(minutedictlist)
 
 def tuneBBParameters(data, lookbacks, z_threshs, ticker_list, stoploss = None):
@@ -277,9 +334,9 @@ def tuneBBParameters(data, lookbacks, z_threshs, ticker_list, stoploss = None):
             kf = multivariateKalmanFilter(syntheticAssetLogPrice, qqqLogPrice)
             state_means, state_covs = kf.filter(qqqLogPrice)
             slopes = state_means[:, np.arange(0, len(ticker_list), 1)]
-            intercept = state_means[:, len(ticker_list)]
+            #intercept = state_means[:, len(ticker_list)]
             
-            syntheticAssetEstimate = [np.dot(slopes[i], syntheticAssetLogPrice.values[i].T) + intercept[i] for i in range(len(slopes))]
+            syntheticAssetEstimate = [np.dot(slopes[i], syntheticAssetLogPrice.values[i].T) for i in range(len(slopes))]
             spread_ts = qqqLogPrice - syntheticAssetEstimate
             
             dataTemp.reset_index(inplace=True)
@@ -295,6 +352,7 @@ def tuneBBParameters(data, lookbacks, z_threshs, ticker_list, stoploss = None):
             
             backtest_data = createBands(price_data, lookback, z_thresh)
             backtest_data = createPositions(backtest_data)
+            #backtest_data = createOptimalPositions(backtest_data)
             hedge_ratios = np.asarray([slopes.T[i][lookback - 1:] for i in range(len(slopes.T))]).T
             
             tradeLog, minuteDf = constructTradeLog(backtest_data['datetime'], 
