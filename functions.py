@@ -317,7 +317,7 @@ def constructTradeLog(datetime, positions, priceY, priceX, hedgeRatios, stoploss
         minuteDict = {}
         
     clist = ['start', 'end', 'holdingPeriod', 'position', 'positionSizeY', 'entryY', 'exitY', 'positionSizeX', 'entryX', 'exitX', 
-             'initialPortfolioValue', 'trade_profit', 'trade_returns', 'trade_profit2']
+             'initialPortfolioValue', 'trade_profit', 'trade_returns']
     return pd.DataFrame(logdictlist, columns=clist), pd.DataFrame(minutedictlist)
 
 def tuneBBParameters(data, lookbacks, z_threshs, ticker_list, stoploss = None):
