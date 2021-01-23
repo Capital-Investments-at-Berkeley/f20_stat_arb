@@ -112,14 +112,12 @@ def univariateKalmanFilter(priceX, priceY):
 
 def multivariateKalmanFilter(pricesX: pd.DataFrame, priceY):
     basket = pricesX.to_numpy()
-    obs_mat = basket[:, np.newaxis]
+    obs_mat = sm.add_constant(basket, prepend=False)[:, np.newaxis]
     basket_size = obs_mat[0].shape[1]
     delta = 1e-5
     trans_cov = delta / (1 - delta) * np.eye(basket_size)
-    #print(basket[0])
     init_mean = basket[0]/priceY[0]
-    #init_mean = np.append(init_mean, [0])
-    #print(init_mean)
+    init_mean = np.append(init_mean, [0])
     kf = KalmanFilter(n_dim_obs=1, n_dim_state=basket_size,
                     initial_state_mean = init_mean,
                     initial_state_covariance = np.ones((basket_size,basket_size)),
